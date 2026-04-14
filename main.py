@@ -283,5 +283,8 @@ async def on_ready():
     print(f"👥 Загружено игроков: {len(data['users'])}")
 
 # Запуск бота
-TOKEN = "ВАШ_ТОКЕН_БОТА"  # ⚠️ ЗАМЕНИТЕ НА РЕАЛЬНЫЙ ТОКЕН
+import os
+TOKEN = os.getenv('TOKEN')
+if not TOKEN:
+    raise ValueError("Токен не найден! Установите переменную окружения TOKEN")
 bot.run(TOKEN)
