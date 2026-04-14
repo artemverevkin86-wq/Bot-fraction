@@ -1,269 +1,287 @@
 import discord
 from discord import app_commands
-from discord.ui import Button, View
+from discord.ext import commands
 import json
 import os
-from typing import Optional, Dict, List
 
-# ==================== КОНФИГУРАЦИЯ ====================
-TOKEN = os.getenv('DISCORD_TOKEN')  # Railway сам подставит переменную окружения
-ADMIN_ROLE_NAME = "Разработчик"
+# Настройки бота
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-# ==================== БАЗА ДАННЫХ ====================
-class Database:
-    def __init__(self, filename: str = "data.json"):
-        self.filename = filename
-        self.data = self.load()
+# ID роли разработчика (замените на ваш ID роли)
+DEVELOPER_ROLE_ID = 1482416918957785290  # ⚠️ ЗАМЕНИТЕ НА РЕАЛЬНЫЙ ID РОЛИ
 
-    def load(self):
-        if os.path.exists(self.filename):
-            with open(self.filename, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        return {
-            "users": {},
-            "factions": ["Арбузы"],
-            "hierarchy_levels": {
-                "Арбузы": ["Новичок", "Садовод", "Старший садовод", "Хранитель семян", "Арбузный лорд"]
-            }
+# Файл для хранения данных
+DATA_FILE = 'factions_data.json'
+
+# Загрузка данных
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    return {
+        "users": {},  # {user_id: {"faction": "Арбузы", "reputation": 0, "rank": "Новичок"}}
+        "factions": ["Арбузы"],  # Список всех фракций
+        "faction_ranks": {  # Ступени иерархии для каждой фракции
+            "Арбузы": ["Новичок", "Садовод", "Арбузный барон", "Король арбузов"]
         }
+    }
 
-    def save(self):
-        with open(self.filename, 'w', encoding='utf-8') as f:
-            json.dump(self.data, f, ensure_ascii=False, indent=2)
+def save_data(data):
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
 
-    def get_user(self, user_id: str) -> dict:
-        user_id = str(user_id)
-        if user_id not in self.data["users"]:
-            self.data["users"][user_id] = {
-                "faction": None,
-                "reputation": 0,
-                "hierarchy_level": "Нет"
-            }
-            self.save()
-        return self.data["users"][user_id]
+# Инициализация данных
+data = load_data()
 
-    def update_user(self, user_id: str, **kwargs):
-        user_id = str(user_id)
-        if user_id not in self.data["users"]:
-            self.get_user(user_id)
-        self.data["users"][user_id].update(kwargs)
-        self.save()
+# Проверка на разработчика
+def is_developer(interaction: discord.Interaction) -> bool:
+    if interaction.user.guild_permissions.administrator:
+        return True
+    role = discord.utils.get(interaction.user.roles, id=DEVELOPER_ROLE_ID)
+    return role is not None
 
-db = Database()
+# Получение данных пользователя
+def get_user_data(user_id: str):
+    if user_id not in data["users"]:
+        data["users"][user_id] = {
+            "faction": "Арбузы",
+            "reputation": 0,
+            "rank": "Новичок"
+        }
+        save_data(data)
+    return data["users"][user_id]
 
-# ==================== ГЛАВНОЕ МЕНЮ (VIEW) ====================
-class MainMenuView(View):
-    def __init__(self, user_id: int):
+# Обновление ранга на основе репутации
+def update_rank(user_id: str):
+    user_data = get_user_data(user_id)
+    faction = user_data["faction"]
+    rep = user_data["reputation"]
+    ranks = data["faction_ranks"].get(faction, ["Новичок"])
+    
+    # Определяем ранг по репутации
+    if rep >= 100:
+        user_data["rank"] = ranks[3] if len(ranks) > 3 else ranks[-1]
+    elif rep >= 50:
+        user_data["rank"] = ranks[2] if len(ranks) > 2 else ranks[-1]
+    elif rep >= 10:
+        user_data["rank"] = ranks[1] if len(ranks) > 1 else ranks[-1]
+    else:
+        user_data["rank"] = ranks[0]
+    
+    save_data(data)
+
+# Главное меню (View с кнопками)
+class MainMenu(discord.ui.View):
+    def __init__(self, user_id: str):
         super().__init__(timeout=None)
         self.user_id = user_id
-
-    @discord.ui.button(label="Об игроке", style=discord.ButtonStyle.primary, custom_id="about_player")
-    async def about_button(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ Это меню не для вас! Используйте `/menu`", ephemeral=True)
+    
+    @discord.ui.button(label="Об игроке", style=discord.ButtonStyle.primary)
+    async def about_player(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ Эта кнопка не для вас!", ephemeral=True)
             return
-        await interaction.response.send_message("🚧 В разработке", ephemeral=True)
-
-    @discord.ui.button(label="Магазин фракций", style=discord.ButtonStyle.success, custom_id="shop")
-    async def shop_button(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ Это меню не для вас! Используйте `/menu`", ephemeral=True)
+        await interaction.response.send_message("🚧 **В разработке**\nФункция 'Об игроке' появится скоро!", ephemeral=True)
+    
+    @discord.ui.button(label="Магазин фракций", style=discord.ButtonStyle.success)
+    async def faction_shop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ Эта кнопка не для вас!", ephemeral=True)
             return
-        await interaction.response.send_message("🚧 В разработке", ephemeral=True)
-
-    @discord.ui.button(label="Выйти из фракции", style=discord.ButtonStyle.danger, custom_id="leave_faction")
-    async def leave_button(self, interaction: discord.Interaction, button: Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ Это меню не для вас! Используйте `/menu`", ephemeral=True)
+        await interaction.response.send_message("🚧 **В разработке**\nМагазин фракций скоро откроется!", ephemeral=True)
+    
+    @discord.ui.button(label="Выйти из фракции", style=discord.ButtonStyle.danger)
+    async def leave_faction(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("❌ Эта кнопка не для вас!", ephemeral=True)
             return
-        await interaction.response.send_message("🚧 В разработке", ephemeral=True)
+        
+        # Сброс фракции на "Арбузы"
+        data["users"][self.user_id]["faction"] = "Арбузы"
+        data["users"][self.user_id]["reputation"] = 0
+        update_rank(self.user_id)
+        save_data(data)
+        
+        await interaction.response.send_message("🍉 Вы вышли из фракции и присоединились к 'Арбузы'!", ephemeral=True)
 
-# ==================== АДМИН ПАНЕЛЬ (VIEW) ====================
-class AdminFactionSelect(discord.ui.Select):
-    def __init__(self):
-        options = [discord.SelectOption(label=f, value=f) for f in db.data["factions"]]
-        super().__init__(placeholder="Выберите фракцию...", options=options, min_values=1, max_values=1)
-
-    async def callback(self, interaction: discord.Interaction):
-        await interaction.response.send_message(f"Выбрана фракция: **{self.values[0]}**", ephemeral=True)
-
-class AdminPanelView(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-        self.add_item(AdminFactionSelect())
-
-    @discord.ui.button(label="➕ Добавить фракцию", style=discord.ButtonStyle.green, row=1)
-    async def add_faction_btn(self, interaction: discord.Interaction, button: Button):
-        modal = AddFactionModal()
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="📊 Редактировать игрока", style=discord.ButtonStyle.blurple, row=1)
-    async def edit_player_btn(self, interaction: discord.Interaction, button: Button):
-        modal = EditPlayerModal()
-        await interaction.response.send_modal(modal)
-
-    @discord.ui.button(label="📋 Список фракций", style=discord.ButtonStyle.gray, row=2)
-    async def list_factions_btn(self, interaction: discord.Interaction, button: Button):
-        factions = "\n".join([f"• {f}" for f in db.data["factions"]])
-        await interaction.response.send_message(f"**Все фракции:**\n{factions}", ephemeral=True)
-
-# ==================== МОДАЛЬНЫЕ ОКНА ====================
-class AddFactionModal(discord.ui.Modal, title="Добавить новую фракцию"):
-    name = discord.ui.TextInput(label="Название фракции", placeholder="Например: Арбузы", max_length=50)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if self.name.value not in db.data["factions"]:
-            db.data["factions"].append(self.name.value)
-            db.data["hierarchy_levels"][self.name.value] = ["Новичок", "Участник", "Ветеран", "Лидер"]
-            db.save()
-            await interaction.response.send_message(f"✅ Фракция **{self.name.value}** добавлена!", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"❌ Фракция уже существует!", ephemeral=True)
-
-class EditPlayerModal(discord.ui.Modal, title="Редактировать игрока"):
-    user_id = discord.ui.TextInput(label="ID пользователя Discord", placeholder="Например: 123456789012345678")
-    faction = discord.ui.TextInput(label="Фракция", placeholder="Название фракции", required=False)
-    reputation = discord.ui.TextInput(label="Репутация", placeholder="Число", required=False)
-    hierarchy = discord.ui.TextInput(label="Ступень в иерархии", placeholder="Название ступени", required=False)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            uid = str(int(self.user_id.value))
-        except ValueError:
-            await interaction.response.send_message("❌ Неверный ID пользователя!", ephemeral=True)
-            return
-
-        updates = {}
-        if self.faction.value:
-            if self.faction.value in db.data["factions"]:
-                updates["faction"] = self.faction.value
-            else:
-                await interaction.response.send_message(f"❌ Фракция '{self.faction.value}' не найдена!", ephemeral=True)
-                return
-
-        if self.reputation.value:
-            try:
-                updates["reputation"] = int(self.reputation.value)
-            except ValueError:
-                await interaction.response.send_message("❌ Репутация должна быть числом!", ephemeral=True)
-                return
-
-        if self.hierarchy.value:
-            updates["hierarchy_level"] = self.hierarchy.value
-
-        if updates:
-            db.update_user(uid, **updates)
-            await interaction.response.send_message(f"✅ Данные пользователя <@{uid}> обновлены!", ephemeral=True)
-        else:
-            await interaction.response.send_message("❌ Не указано ни одного поля для обновления!", ephemeral=True)
-
-# ==================== КЛИЕНТ ====================
-class FactionBot(discord.Client):
-    def __init__(self):
-        intents = discord.Intents.default()
-        intents.message_content = True
-        super().__init__(intents=intents)
-        self.tree = app_commands.CommandTree(self)
-
-    async def setup_hook(self):
-        await self.tree.sync()
-        print(f"✅ Бот запущен! Синхронизировано команд.")
-
-client = FactionBot()
-
-# ==================== ПРОВЕРКА АДМИНА ====================
-def is_admin(interaction: discord.Interaction) -> bool:
-    if not interaction.guild:
-        return False
-    member = interaction.guild.get_member(interaction.user.id)
-    if not member:
-        return False
-    return any(role.name == ADMIN_ROLE_NAME for role in member.roles)
-
-# ==================== КОМАНДЫ ====================
-@client.tree.command(name="menu", description="Открыть главное меню фракций")
-async def menu_command(interaction: discord.Interaction):
-    user_data = db.get_user(interaction.user.id)
-
-    faction = user_data.get("faction") or "Нет"
-    reputation = user_data.get("reputation", 0)
-    hierarchy = user_data.get("hierarchy_level") or "Нет"
-
+# Команда /меню
+@bot.tree.command(name="меню", description="Показать главное меню фракций")
+async def menu(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    user_data = get_user_data(user_id)
+    
     embed = discord.Embed(
         title="**ВАШИ ФРАКЦИИ**",
         color=discord.Color.green()
     )
-    embed.add_field(
-        name="",
-        value=f"```Ваша фракция: {faction}\nВаша репутация: {reputation}\nСтупень в иерархии: {hierarchy}```",
-        inline=False
-    )
-
-    view = MainMenuView(user_id=interaction.user.id)
+    embed.description = f"```\nВаша фракция: {user_data['faction']}\nВаша репутация: {user_data['reputation']}\nСтупень в иерархии: {user_data['rank']}\n```"
+    
+    view = MainMenu(user_id)
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-@client.tree.command(name="admin", description="Открыть админ-панель (только для разработчиков)")
-async def admin_command(interaction: discord.Interaction):
-    if not is_admin(interaction):
+# АДМИН ПАНЕЛЬ
+class AdminPanel(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+    
+    @discord.ui.button(label="Добавить фракцию", style=discord.ButtonStyle.primary, row=0)
+    async def add_faction(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_developer(interaction):
+            await interaction.response.send_message("❌ У вас нет прав разработчика!", ephemeral=True)
+            return
+        
+        modal = AddFactionModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="Изменить репутацию", style=discord.ButtonStyle.success, row=0)
+    async def change_reputation(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_developer(interaction):
+            await interaction.response.send_message("❌ У вас нет прав разработчика!", ephemeral=True)
+            return
+        
+        modal = ChangeReputationModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="Сменить фракцию игроку", style=discord.ButtonStyle.secondary, row=0)
+    async def change_faction(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_developer(interaction):
+            await interaction.response.send_message("❌ У вас нет прав разработчика!", ephemeral=True)
+            return
+        
+        modal = ChangeFactionModal()
+        await interaction.response.send_modal(modal)
+    
+    @discord.ui.button(label="Список фракций", style=discord.ButtonStyle.secondary, row=1)
+    async def list_factions(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_developer(interaction):
+            await interaction.response.send_message("❌ У вас нет прав разработчика!", ephemeral=True)
+            return
+        
+        factions_list = "\n".join([f"🍉 {f}" for f in data["factions"]])
+        await interaction.response.send_message(f"**Существующие фракции:**\n{factions_list}", ephemeral=True)
+    
+    @discord.ui.button(label="Статистика игроков", style=discord.ButtonStyle.secondary, row=1)
+    async def player_stats(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not is_developer(interaction):
+            await interaction.response.send_message("❌ У вас нет прав разработчика!", ephemeral=True)
+            return
+        
+        stats = "**Статистика игроков:**\n"
+        for uid, udata in data["users"].items():
+            user = await bot.fetch_user(int(uid))
+            name = user.name if user else uid
+            stats += f"• {name}: {udata['faction']} | Реп: {udata['reputation']} | Ранг: {udata['rank']}\n"
+        
+        if len(stats) > 2000:
+            stats = stats[:1990] + "..."
+        
+        await interaction.response.send_message(stats, ephemeral=True)
+
+# Модальные окна для админ-панели
+class AddFactionModal(discord.ui.Modal, title="Добавить фракцию"):
+    faction_name = discord.ui.TextInput(label="Название фракции", placeholder="Например: Арбузы", required=True)
+    ranks = discord.ui.TextInput(label="Ступени иерархии (через запятую)", placeholder="Новичок,Садовод,Барон,Король", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_developer(interaction):
+            await interaction.response.send_message("❌ Нет прав!", ephemeral=True)
+            return
+        
+        name = self.faction_name.value.strip()
+        if name in data["factions"]:
+            await interaction.response.send_message("❌ Такая фракция уже существует!", ephemeral=True)
+            return
+        
+        data["factions"].append(name)
+        ranks_list = [r.strip() for r in self.ranks.value.split(",")]
+        data["faction_ranks"][name] = ranks_list
+        save_data(data)
+        
+        await interaction.response.send_message(f"✅ Фракция **{name}** добавлена с рангами: {', '.join(ranks_list)}", ephemeral=True)
+
+class ChangeReputationModal(discord.ui.Modal, title="Изменить репутацию"):
+    user_id = discord.ui.TextInput(label="ID пользователя", placeholder="123456789012345678", required=True)
+    amount = discord.ui.TextInput(label="Количество (+/-)", placeholder="+10 или -5", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_developer(interaction):
+            await interaction.response.send_message("❌ Нет прав!", ephemeral=True)
+            return
+        
+        try:
+            uid = self.user_id.value
+            amount = int(self.amount.value)
+            
+            if uid not in data["users"]:
+                get_user_data(uid)
+            
+            data["users"][uid]["reputation"] += amount
+            if data["users"][uid]["reputation"] < 0:
+                data["users"][uid]["reputation"] = 0
+            
+            update_rank(uid)
+            save_data(data)
+            
+            await interaction.response.send_message(f"✅ Репутация игрока <@{uid}> изменена на {amount} (теперь: {data['users'][uid]['reputation']})", ephemeral=True)
+        except ValueError:
+            await interaction.response.send_message("❌ Неверное количество! Используйте число.", ephemeral=True)
+
+class ChangeFactionModal(discord.ui.Modal, title="Сменить фракцию"):
+    user_id = discord.ui.TextInput(label="ID пользователя", placeholder="123456789012345678", required=True)
+    faction = discord.ui.TextInput(label="Название фракции", placeholder="Арбузы", required=True)
+    
+    async def on_submit(self, interaction: discord.Interaction):
+        if not is_developer(interaction):
+            await interaction.response.send_message("❌ Нет прав!", ephemeral=True)
+            return
+        
+        uid = self.user_id.value
+        new_faction = self.faction.value.strip()
+        
+        if new_faction not in data["factions"]:
+            await interaction.response.send_message(f"❌ Фракция '{new_faction}' не существует!", ephemeral=True)
+            return
+        
+        if uid not in data["users"]:
+            get_user_data(uid)
+        
+        data["users"][uid]["faction"] = new_faction
+        data["users"][uid]["reputation"] = 0
+        update_rank(uid)
+        save_data(data)
+        
+        await interaction.response.send_message(f"✅ Игрок <@{uid}> переведен во фракцию {new_faction}", ephemeral=True)
+
+# Команда /админ
+@bot.tree.command(name="админ", description="Админ-панель управления фракциями")
+async def admin_panel(interaction: discord.Interaction):
+    if not is_developer(interaction):
         await interaction.response.send_message("❌ У вас нет доступа к админ-панели!", ephemeral=True)
         return
-
+    
     embed = discord.Embed(
-        title="⚙️ Админ-панель",
-        description="Управление фракциями и игроками",
-        color=discord.Color.red()
+        title="🛠️ **Админ-панель фракций**",
+        description="Управляйте фракциями и игроками",
+        color=discord.Color.purple()
     )
-
-    factions_list = "\n".join([f"• {f}" for f in db.data["factions"]])
-    embed.add_field(name="Доступные фракции:", value=factions_list or "Нет фракций", inline=False)
-
-    view = AdminPanelView()
+    view = AdminPanel()
     await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
-@client.tree.command(name="join", description="Вступить в фракцию")
-@app_commands.describe(faction="Название фракции")
-async def join_command(interaction: discord.Interaction, faction: str):
-    if faction not in db.data["factions"]:
-        await interaction.response.send_message(f"❌ Фракция '{faction}' не найдена!", ephemeral=True)
-        return
+# Команда для теста
+@bot.tree.command(name="тест", description="Проверка работы бота")
+async def test(interaction: discord.Interaction):
+    await interaction.response.send_message("✅ Бот работает!", ephemeral=True)
 
-    hierarchy_levels = db.data["hierarchy_levels"].get(faction, ["Новичок"])
-    db.update_user(
-        interaction.user.id,
-        faction=faction,
-        reputation=0,
-        hierarchy_level=hierarchy_levels[0]
-    )
-    await interaction.response.send_message(f"✅ Вы вступили во фракцию **{faction}**!", ephemeral=True)
+# Событие при запуске
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f"✅ Бот {bot.user} запущен!")
+    print(f"📁 Загружено фракций: {len(data['factions'])}")
+    print(f"👥 Загружено игроков: {len(data['users'])}")
 
-@client.tree.command(name="set_reputation", description="Установить репутацию игроку (админ)")
-@app_commands.describe(user="Пользователь", reputation="Новая репутация")
-async def set_rep_command(interaction: discord.Interaction, user: discord.User, reputation: int):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Нет доступа!", ephemeral=True)
-        return
-
-    db.update_user(user.id, reputation=reputation)
-    await interaction.response.send_message(f"✅ Репутация {user.mention} установлена на **{reputation}**", ephemeral=True)
-
-@client.tree.command(name="set_faction", description="Установить фракцию игроку (админ)")
-@app_commands.describe(user="Пользователь", faction="Название фракции")
-async def set_faction_command(interaction: discord.Interaction, user: discord.User, faction: str):
-    if not is_admin(interaction):
-        await interaction.response.send_message("❌ Нет доступа!", ephemeral=True)
-        return
-
-    if faction not in db.data["factions"]:
-        await interaction.response.send_message(f"❌ Фракция '{faction}' не найдена!", ephemeral=True)
-        return
-
-    hierarchy = db.data["hierarchy_levels"].get(faction, ["Новичок"])[0]
-    db.update_user(user.id, faction=faction, hierarchy_level=hierarchy)
-    await interaction.response.send_message(f"✅ {user.mention} теперь во фракции **{faction}**", ephemeral=True)
-
-# ==================== ЗАПУСК ====================
-if __name__ == "__main__":
-    if not TOKEN:
-        print("❌ Ошибка: DISCORD_TOKEN не найден в переменных окружения!")
-    else:
-        client.run(TOKEN)
+# Запуск бота
+TOKEN = "ВАШ_ТОКЕН_БОТА"  # ⚠️ ЗАМЕНИТЕ НА РЕАЛЬНЫЙ ТОКЕН
+bot.run(TOKEN)
