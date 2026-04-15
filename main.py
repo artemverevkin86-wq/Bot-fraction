@@ -52,6 +52,13 @@ class Database:
             self.save()
         return self.data["users"][user_id]
 
+    def get_user_by_name(self, name: str):
+        """Поиск пользователя по имени или упоминанию"""
+        name = name.lower().strip()
+        for uid in self.data["users"]:
+            return uid  # нужно передавать объект пользователя из Discord
+        return None
+
     def update_user(self, user_id: str, **kwargs):
         user_id = str(user_id)
         if user_id not in self.data["users"]:
@@ -122,7 +129,6 @@ class Database:
         return False
     
     def check_completed_works(self):
-        """Проверяет завершённые работы NPC и выдаёт награды"""
         completed = []
         now = datetime.now()
         for nid, npc in self.data["npcs"].items():
@@ -149,12 +155,12 @@ def is_admin(interaction: discord.Interaction) -> bool:
 
 # ==================== ФУНКЦИИ ДЛЯ ОТОБРАЖЕНИЯ ====================
 async def show_player_stats(interaction: discord.Interaction, target_user: discord.User):
-    """Публичная статистика игрока (без кнопок)"""
+    """Публичная статистика игрока (видят все)"""
     user_data = db.get_user(target_user.id)
     faction = db.get_user_faction(target_user.id)
     
     embed = discord.Embed(
-        title=f"📊 ИГРОК: {target_user.name}",
+        title=f"📊 ИГРОК: {target_user.display_name}",
         color=discord.Color.green()
     )
     
@@ -172,7 +178,7 @@ async def show_player_stats(interaction: discord.Interaction, target_user: disco
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
 async def show_faction_members(interaction: discord.Interaction, faction_id: str):
-    """Список членов фракции"""
+    """Список членов фракции (только для отправителя)"""
     faction = db.get_faction(faction_id)
     members = db.get_faction_members(faction_id)
     
@@ -196,7 +202,7 @@ async def show_faction_members(interaction: discord.Interaction, faction_id: str
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def show_faction_npcs(interaction: discord.Interaction, faction_id: str):
-    """Список NPC фракции"""
+    """Список NPC фракции (только для отправителя)"""
     faction = db.get_faction(faction_id)
     npcs = db.get_faction_npcs(faction_id)
     
@@ -222,7 +228,7 @@ async def show_faction_npcs(interaction: discord.Interaction, faction_id: str):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def show_faction_economy(interaction: discord.Interaction, faction_id: str):
-    """Экономика фракции"""
+    """Экономика фракции (только для отправителя)"""
     faction = db.get_faction(faction_id)
     
     embed = discord.Embed(
@@ -240,7 +246,7 @@ async def show_faction_economy(interaction: discord.Interaction, faction_id: str
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def show_faction_menu(interaction: discord.Interaction, target_user: discord.User):
-    """Публичная информация о фракции игрока (с кнопками для владельца)"""
+    """Публичная информация о фракции (видят все, кнопки только владельцу)"""
     user_data = db.get_user(target_user.id)
     
     if not user_data["faction_id"]:
@@ -276,12 +282,13 @@ async def show_faction_menu(interaction: discord.Interaction, target_user: disco
     embed.add_field(name="👥 Игроков", value=f"{len(members)}/{faction['max_players']}", inline=True)
     embed.add_field(name="🤖 NPC", value=str(len(npcs)), inline=True)
     embed.add_field(name="💎 Валюта", value=faction["currency"], inline=True)
-    embed.add_field(name="🏠 База", value=f"<#{faction['base_channel']}>" if faction['base_channel'].isdigit() else faction['base_channel'], inline=True)
+    embed.add_field(name="🏠 База", value=f"<#{faction['base_channel']}>", inline=True)
     embed.add_field(name="📜 Иерархия", value=" → ".join(faction["hierarchy"]), inline=False)
     
     if faction.get("description"):
         embed.add_field(name="📝 Описание", value=faction["description"][:1024], inline=False)
     
+    # Только владелец меню видит кнопки (но само сообщение публичное)
     if interaction.user.id == target_user.id:
         view = FactionMenuView(interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
@@ -334,7 +341,7 @@ class ActionsView(View):
             return
         
         if db.is_faction_leader(self.user_id):
-            await interaction.response.send_message("❌ Лидер не может выйти! Используйте /передать_лидерство или /распустить", ephemeral=True)
+            await interaction.response.send_message("❌ Лидер не может выйти! Используйте /передать_лидерство", ephemeral=True)
             return
         
         faction = db.get_faction(user["faction_id"])
@@ -505,6 +512,285 @@ class NPCManageView(View):
         view = FireNPCSelectView(self.user_id, npcs)
         await interaction.response.send_message("Выберите NPC для увольнения:", view=view, ephemeral=True)
 
+# ==================== МОДАЛЬНЫЕ ОКНА ====================
+class CreateFactionModal(Modal, title="Создание фракции"):
+    name = TextInput(label="Название фракции", placeholder="3-30 символов", max_length=30, min_length=3)
+    max_players = TextInput(label="Максимум игроков", placeholder="5-100", default="20")
+    base_channel = TextInput(label="Канал базы", placeholder="#название-канала", required=True)
+    currency = TextInput(label="Название валюты", placeholder="Например: монеты", default="монеты")
+    flag = TextInput(label="Флаг (эмодзи)", placeholder="🏴", required=False, max_length=5)
+    tax = TextInput(label="Налог %", placeholder="0-15", default="5")
+    faction_type = TextInput(label="Тип фракции", placeholder="торговая/военная/строительная", default="торговая")
+    color = TextInput(label="Цвет (HEX)", placeholder="#2b2d31", default="#2b2d31", required=False)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        
+        if db.get_user_faction(user_id):
+            await interaction.response.send_message("❌ Вы уже состоите во фракции!", ephemeral=True)
+            return
+        
+        # Поиск канала по названию
+        channel_name = self.base_channel.value.strip().lstrip('#')
+        channel = None
+        for ch in interaction.guild.text_channels:
+            if ch.name == channel_name:
+                channel = ch
+                break
+        
+        if not channel:
+            await interaction.response.send_message(f"❌ Канал #{channel_name} не найден на сервере!", ephemeral=True)
+            return
+        
+        fid, _ = db.get_faction_by_name(self.name.value)
+        if fid:
+            await interaction.response.send_message("❌ Фракция с таким названием уже существует!", ephemeral=True)
+            return
+        
+        try:
+            tax = int(self.tax.value)
+            if tax < 0 or tax > 15:
+                raise ValueError
+        except:
+            await interaction.response.send_message("❌ Налог должен быть числом от 0 до 15!", ephemeral=True)
+            return
+        
+        try:
+            max_players = int(self.max_players.value)
+            if max_players < 5 or max_players > 100:
+                raise ValueError
+        except:
+            await interaction.response.send_message("❌ Максимум игроков должен быть от 5 до 100!", ephemeral=True)
+            return
+        
+        faction_type = self.faction_type.value.lower()
+        if faction_type not in ["торговая", "военная", "строительная"]:
+            faction_type = "торговая"
+        
+        faction_id = str(int(datetime.now().timestamp()))
+        faction_data = {
+            "name": self.name.value,
+            "leader_id": user_id,
+            "max_players": max_players,
+            "base_channel": str(channel.id),
+            "currency": self.currency.value,
+            "flag": self.flag.value or "🏛️",
+            "tax": tax,
+            "type": faction_type,
+            "color": self.color.value,
+            "description": "Новая фракция",
+            "created_at": datetime.now().isoformat(),
+            "resources": {"gold": 100, "wood": 50, "ore": 50},
+            "hierarchy": ["Новичок", "Боец", "Советник", "Лидер"]
+        }
+        
+        db.data["factions"][faction_id] = faction_data
+        db.update_user(user_id, faction_id=faction_id, rank="Лидер", joined_at=datetime.now().isoformat())
+        db.save()
+        
+        embed = discord.Embed(
+            title=f"✅ Фракция **{self.name.value}** создана!",
+            description=f"Ты стал Лидером!\n💰 Валюта: {self.currency.value}\n📊 Налог: {tax}%\n🏛️ Тип: {faction_type}\n🏠 База: {channel.mention}",
+            color=discord.Color.green()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class InvitePlayerModal(Modal, title="Пригласить игрока"):
+    user_mention = TextInput(label="Упоминание игрока", placeholder="@Игрок или никнейм", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        inviter = db.get_user(interaction.user.id)
+        if not inviter["faction_id"]:
+            await interaction.response.send_message("❌ Вы не состоите во фракции!", ephemeral=True)
+            return
+        
+        faction = db.get_faction(inviter["faction_id"])
+        members = db.get_faction_members(inviter["faction_id"])
+        
+        if len(members) >= faction["max_players"]:
+            await interaction.response.send_message(f"❌ Фракция достигла лимита в {faction['max_players']} игроков!", ephemeral=True)
+            return
+        
+        # Поиск пользователя по упоминанию или никнейму
+        target = None
+        mention = self.user_mention.value.strip()
+        
+        # Пробуем извлечь ID из упоминания
+        if mention.startswith('<@') and mention.endswith('>'):
+            user_id = mention.strip('<@!>')
+            try:
+                target = await interaction.client.fetch_user(int(user_id))
+            except:
+                pass
+        
+        # Если не нашли, ищем по имени
+        if not target:
+            for member in interaction.guild.members:
+                if member.name.lower() == mention.lower() or member.display_name.lower() == mention.lower():
+                    target = member
+                    break
+        
+        if not target:
+            await interaction.response.send_message("❌ Пользователь не найден! Укажите @упоминание или никнейм.", ephemeral=True)
+            return
+        
+        target_data = db.get_user(target.id)
+        if target_data["faction_id"]:
+            await interaction.response.send_message("❌ Этот игрок уже состоит во фракции!", ephemeral=True)
+            return
+        
+        view = InviteConfirmView(inviter["faction_id"], interaction.user.id)
+        embed = discord.Embed(
+            title=f"📢 Приглашение во фракцию {faction['name']}",
+            description=f"Игрок {interaction.user.mention} приглашает тебя!\nНажми ✅ чтобы принять.",
+            color=discord.Color.blue()
+        )
+        
+        try:
+            await target.send(embed=embed, view=view)
+            await interaction.response.send_message(f"✅ Приглашение отправлено {target.mention}!", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message(f"❌ Не могу отправить сообщение {target.mention}! У него закрыты ЛС.", ephemeral=True)
+
+class InviteConfirmView(View):
+    def __init__(self, faction_id: str, inviter_id: int):
+        super().__init__(timeout=120)
+        self.faction_id = faction_id
+        self.inviter_id = inviter_id
+
+    @discord.ui.button(label="✅ Принять", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: Button):
+        faction = db.get_faction(self.faction_id)
+        if not faction:
+            await interaction.response.send_message("❌ Фракция больше не существует!", ephemeral=True)
+            return
+        
+        members = db.get_faction_members(self.faction_id)
+        if len(members) >= faction["max_players"]:
+            await interaction.response.send_message(f"❌ Фракция достигла лимита!", ephemeral=True)
+            return
+        
+        db.update_user(interaction.user.id, faction_id=self.faction_id, rank="Новичок", joined_at=datetime.now().isoformat())
+        await interaction.response.send_message(f"✅ Вы вступили во фракцию **{faction['name']}**!", ephemeral=True)
+
+    @discord.ui.button(label="❌ Отклонить", style=discord.ButtonStyle.danger)
+    async def decline(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("❌ Вы отклонили приглашение.", ephemeral=True)
+
+class ChangeRankModal(Modal, title="Изменить ступень"):
+    user_mention = TextInput(label="Игрок", placeholder="@Игрок или никнейм", required=True)
+    new_rank = TextInput(label="Новая ступень", placeholder="Новичок/Боец/Советник/Лидер", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not db.is_faction_leader(interaction.user.id):
+            await interaction.response.send_message("❌ Только лидер может менять ступени!", ephemeral=True)
+            return
+        
+        # Поиск пользователя
+        target = None
+        mention = self.user_mention.value.strip()
+        
+        if mention.startswith('<@') and mention.endswith('>'):
+            user_id = mention.strip('<@!>')
+            try:
+                target = await interaction.client.fetch_user(int(user_id))
+            except:
+                pass
+        
+        if not target:
+            for member in interaction.guild.members:
+                if member.name.lower() == mention.lower() or member.display_name.lower() == mention.lower():
+                    target = member
+                    break
+        
+        if not target:
+            await interaction.response.send_message("❌ Пользователь не найден!", ephemeral=True)
+            return
+        
+        target_data = db.get_user(target.id)
+        if not target_data["faction_id"]:
+            await interaction.response.send_message("❌ Игрок не состоит во фракции!", ephemeral=True)
+            return
+        
+        faction = db.get_faction(target_data["faction_id"])
+        if faction["leader_id"] != str(interaction.user.id):
+            await interaction.response.send_message("❌ Это не ваш подчинённый!", ephemeral=True)
+            return
+        
+        if self.new_rank.value not in faction["hierarchy"]:
+            await interaction.response.send_message(f"❌ Ступень '{self.new_rank.value}' не найдена в иерархии!", ephemeral=True)
+            return
+        
+        db.update_user(target.id, rank=self.new_rank.value)
+        await interaction.response.send_message(f"✅ Игроку {target.mention} назначена ступень **{self.new_rank.value}**", ephemeral=True)
+
+class ChangeTaxModal(Modal, title="Изменить налоги"):
+    new_tax = TextInput(label="Новый налог %", placeholder="0-15", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not db.is_faction_leader(interaction.user.id):
+            await interaction.response.send_message("❌ Только лидер может менять налоги!", ephemeral=True)
+            return
+        
+        try:
+            tax = int(self.new_tax.value)
+            if tax < 0 or tax > 15:
+                raise ValueError
+        except:
+            await interaction.response.send_message("❌ Налог должен быть числом от 0 до 15!", ephemeral=True)
+            return
+        
+        user = db.get_user(interaction.user.id)
+        faction = db.get_faction(user["faction_id"])
+        faction["tax"] = tax
+        db.save()
+        
+        await interaction.response.send_message(f"✅ Налог фракции изменён на **{tax}%**", ephemeral=True)
+
+class TransferLeadershipModal(Modal, title="Передать лидерство"):
+    new_leader = TextInput(label="Новый лидер", placeholder="@Игрок или никнейм", required=True)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if not db.is_faction_leader(interaction.user.id):
+            await interaction.response.send_message("❌ Только лидер может передать лидерство!", ephemeral=True)
+            return
+        
+        # Поиск пользователя
+        target = None
+        mention = self.new_leader.value.strip()
+        
+        if mention.startswith('<@') and mention.endswith('>'):
+            user_id = mention.strip('<@!>')
+            try:
+                target = await interaction.client.fetch_user(int(user_id))
+            except:
+                pass
+        
+        if not target:
+            for member in interaction.guild.members:
+                if member.name.lower() == mention.lower() or member.display_name.lower() == mention.lower():
+                    target = member
+                    break
+        
+        if not target:
+            await interaction.response.send_message("❌ Пользователь не найден!", ephemeral=True)
+            return
+        
+        user = db.get_user(interaction.user.id)
+        faction = db.get_faction(user["faction_id"])
+        
+        target_data = db.get_user(target.id)
+        if target_data["faction_id"] != user["faction_id"]:
+            await interaction.response.send_message("❌ Игрок не состоит в вашей фракции!", ephemeral=True)
+            return
+        
+        faction["leader_id"] = str(target.id)
+        db.update_user(interaction.user.id, rank="Советник")
+        db.update_user(target.id, rank="Лидер")
+        db.save()
+        
+        await interaction.response.send_message(f"✅ Лидерство передано {target.mention}!", ephemeral=True)
+
 class HireNPCModal(Modal, title="Наём NPC"):
     name = TextInput(label="Имя NPC", placeholder="Например: Лесоруб Петя", max_length=30, min_length=2)
     loyalty = TextInput(label="Лояльность (0-100)", placeholder="50", default="50")
@@ -544,7 +830,6 @@ class HireNPCModal(Modal, title="Наём NPC"):
         npc_id = db.add_npc(user["faction_id"], self.name.value, None, loyalty, skill)
         
         await interaction.response.send_message(f"✅ NPC **{self.name.value}** нанят за {hire_cost} {faction['currency']}!\nЛояльность: {loyalty}, Навык: {skill}", ephemeral=True)
-        print(f"🤖 {interaction.user.name} нанял NPC {self.name.value}")
 
 class AssignWorkSelectView(View):
     def __init__(self, user_id: int, npcs: list):
@@ -600,7 +885,6 @@ class WorkTypeSelectView(View):
         
         npc = db.data["npcs"][self.npc_id]
         await interaction.response.send_message(f"✅ {npc['name']} отправлен на работу **{job_name}** на {job['hours']} часа(ов)!", ephemeral=True)
-        print(f"🔨 {interaction.user.name} отправил NPC {npc['name']} на работу {job_name}")
 
 class FireNPCSelectView(View):
     def __init__(self, user_id: int, npcs: list):
@@ -623,227 +907,6 @@ class FireNPCSelectView(View):
         db.save()
         
         await interaction.response.send_message(f"✅ NPC **{name}** уволен!", ephemeral=True)
-        print(f"🗑️ {interaction.user.name} уволил NPC {name}")
-
-# ==================== МОДАЛЬНЫЕ ОКНА ====================
-class CreateFactionModal(Modal, title="Создание фракции"):
-    name = TextInput(label="Название фракции", placeholder="3-30 символов", max_length=30, min_length=3)
-    max_players = TextInput(label="Максимум игроков", placeholder="5-100", default="20")
-    base_channel = TextInput(label="ID канала базы", placeholder="Введите числовой ID текстового канала", required=True)
-    currency = TextInput(label="Название валюты", placeholder="Например: монеты", default="монеты")
-    flag = TextInput(label="Флаг (эмодзи)", placeholder="🏴", required=False, max_length=5)
-    tax = TextInput(label="Налог %", placeholder="0-15", default="5")
-    faction_type = TextInput(label="Тип фракции", placeholder="торговая/военная/строительная", default="торговая")
-    color = TextInput(label="Цвет (HEX)", placeholder="#2b2d31", default="#2b2d31", required=False)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
-        
-        if db.get_user_faction(user_id):
-            await interaction.response.send_message("❌ Вы уже состоите во фракции!", ephemeral=True)
-            return
-        
-        # Проверка существования канала
-        try:
-            channel_id = int(self.base_channel.value.strip())
-            channel = interaction.guild.get_channel(channel_id)
-            if not channel or not isinstance(channel, discord.TextChannel):
-                await interaction.response.send_message("❌ Канал не найден! Укажите правильный ID текстового канала.", ephemeral=True)
-                return
-        except ValueError:
-            await interaction.response.send_message("❌ Неверный ID канала! Введите числовой ID.", ephemeral=True)
-            return
-        
-        fid, _ = db.get_faction_by_name(self.name.value)
-        if fid:
-            await interaction.response.send_message("❌ Фракция с таким названием уже существует!", ephemeral=True)
-            return
-        
-        try:
-            tax = int(self.tax.value)
-            if tax < 0 or tax > 15:
-                raise ValueError
-        except:
-            await interaction.response.send_message("❌ Налог должен быть числом от 0 до 15!", ephemeral=True)
-            return
-        
-        try:
-            max_players = int(self.max_players.value)
-            if max_players < 5 or max_players > 100:
-                raise ValueError
-        except:
-            await interaction.response.send_message("❌ Максимум игроков должен быть от 5 до 100!", ephemeral=True)
-            return
-        
-        faction_type = self.faction_type.value.lower()
-        if faction_type not in ["торговая", "военная", "строительная"]:
-            faction_type = "торговая"
-        
-        faction_id = str(int(datetime.now().timestamp()))
-        faction_data = {
-            "name": self.name.value,
-            "leader_id": user_id,
-            "max_players": max_players,
-            "base_channel": str(channel_id),
-            "currency": self.currency.value,
-            "flag": self.flag.value or "🏛️",
-            "tax": tax,
-            "type": faction_type,
-            "color": self.color.value,
-            "description": "Новая фракция",
-            "created_at": datetime.now().isoformat(),
-            "resources": {"gold": 100, "wood": 50, "ore": 50},
-            "hierarchy": ["Новичок", "Боец", "Советник", "Лидер"]
-        }
-        
-        db.data["factions"][faction_id] = faction_data
-        db.update_user(user_id, faction_id=faction_id, rank="Лидер", joined_at=datetime.now().isoformat())
-        db.save()
-        
-        embed = discord.Embed(
-            title=f"✅ Фракция **{self.name.value}** создана!",
-            description=f"Ты стал Лидером!\n💰 Валюта: {self.currency.value}\n📊 Налог: {tax}%\n🏛️ Тип: {faction_type}\n🏠 База: {channel.mention}",
-            color=discord.Color.green()
-        )
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-        print(f"🏛️ {interaction.user.name} создал фракцию {self.name.value}")
-
-class InvitePlayerModal(Modal, title="Пригласить игрока"):
-    user_id = TextInput(label="ID пользователя", placeholder="Введите Discord ID", required=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        inviter = db.get_user(interaction.user.id)
-        if not inviter["faction_id"]:
-            await interaction.response.send_message("❌ Вы не состоите во фракции!", ephemeral=True)
-            return
-        
-        faction = db.get_faction(inviter["faction_id"])
-        members = db.get_faction_members(inviter["faction_id"])
-        
-        if len(members) >= faction["max_players"]:
-            await interaction.response.send_message(f"❌ Фракция достигла лимита в {faction['max_players']} игроков!", ephemeral=True)
-            return
-        
-        try:
-            target_user = await interaction.client.fetch_user(int(self.user_id.value))
-        except:
-            await interaction.response.send_message("❌ Пользователь не найден! Проверьте ID.", ephemeral=True)
-            return
-        
-        target_data = db.get_user(target_user.id)
-        if target_data["faction_id"]:
-            await interaction.response.send_message("❌ Этот игрок уже состоит во фракции!", ephemeral=True)
-            return
-        
-        view = InviteConfirmView(inviter["faction_id"], interaction.user.id)
-        embed = discord.Embed(
-            title=f"📢 Приглашение во фракцию {faction['name']}",
-            description=f"Игрок {interaction.user.mention} приглашает тебя!\nНажми ✅ чтобы принять.",
-            color=discord.Color.blue()
-        )
-        
-        try:
-            await target_user.send(embed=embed, view=view)
-            await interaction.response.send_message(f"✅ Приглашение отправлено {target_user.mention}!", ephemeral=True)
-        except discord.Forbidden:
-            await interaction.response.send_message(f"❌ Не могу отправить сообщение {target_user.mention}! У него закрыты ЛС.", ephemeral=True)
-
-class InviteConfirmView(View):
-    def __init__(self, faction_id: str, inviter_id: int):
-        super().__init__(timeout=120)
-        self.faction_id = faction_id
-        self.inviter_id = inviter_id
-
-    @discord.ui.button(label="✅ Принять", style=discord.ButtonStyle.success)
-    async def accept(self, interaction: discord.Interaction, button: Button):
-        faction = db.get_faction(self.faction_id)
-        if not faction:
-            await interaction.response.send_message("❌ Фракция больше не существует!", ephemeral=True)
-            return
-        
-        members = db.get_faction_members(self.faction_id)
-        if len(members) >= faction["max_players"]:
-            await interaction.response.send_message(f"❌ Фракция достигла лимита!", ephemeral=True)
-            return
-        
-        db.update_user(interaction.user.id, faction_id=self.faction_id, rank="Новичок", joined_at=datetime.now().isoformat())
-        await interaction.response.send_message(f"✅ Вы вступили во фракцию **{faction['name']}**!", ephemeral=True)
-
-    @discord.ui.button(label="❌ Отклонить", style=discord.ButtonStyle.danger)
-    async def decline(self, interaction: discord.Interaction, button: Button):
-        await interaction.response.send_message("❌ Вы отклонили приглашение.", ephemeral=True)
-
-class ChangeRankModal(Modal, title="Изменить ступень"):
-    user_id = TextInput(label="ID пользователя", placeholder="Discord ID", required=True)
-    new_rank = TextInput(label="Новая ступень", placeholder="Новичок/Боец/Советник/Лидер", required=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not db.is_faction_leader(interaction.user.id):
-            await interaction.response.send_message("❌ Только лидер может менять ступени!", ephemeral=True)
-            return
-        
-        target = db.get_user(self.user_id.value)
-        if not target["faction_id"]:
-            await interaction.response.send_message("❌ Игрок не состоит во фракции!", ephemeral=True)
-            return
-        
-        faction = db.get_faction(target["faction_id"])
-        if faction["leader_id"] != str(interaction.user.id):
-            await interaction.response.send_message("❌ Это не ваш подчинённый!", ephemeral=True)
-            return
-        
-        if self.new_rank.value not in faction["hierarchy"]:
-            await interaction.response.send_message(f"❌ Ступень '{self.new_rank.value}' не найдена в иерархии!", ephemeral=True)
-            return
-        
-        db.update_user(self.user_id.value, rank=self.new_rank.value)
-        await interaction.response.send_message(f"✅ Игроку <@{self.user_id.value}> назначена ступень **{self.new_rank.value}**", ephemeral=True)
-
-class ChangeTaxModal(Modal, title="Изменить налоги"):
-    new_tax = TextInput(label="Новый налог %", placeholder="0-15", required=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not db.is_faction_leader(interaction.user.id):
-            await interaction.response.send_message("❌ Только лидер может менять налоги!", ephemeral=True)
-            return
-        
-        try:
-            tax = int(self.new_tax.value)
-            if tax < 0 or tax > 15:
-                raise ValueError
-        except:
-            await interaction.response.send_message("❌ Налог должен быть числом от 0 до 15!", ephemeral=True)
-            return
-        
-        user = db.get_user(interaction.user.id)
-        faction = db.get_faction(user["faction_id"])
-        faction["tax"] = tax
-        db.save()
-        
-        await interaction.response.send_message(f"✅ Налог фракции изменён на **{tax}%**", ephemeral=True)
-
-class TransferLeadershipModal(Modal, title="Передать лидерство"):
-    new_leader_id = TextInput(label="ID нового лидера", placeholder="Discord ID", required=True)
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not db.is_faction_leader(interaction.user.id):
-            await interaction.response.send_message("❌ Только лидер может передать лидерство!", ephemeral=True)
-            return
-        
-        user = db.get_user(interaction.user.id)
-        faction = db.get_faction(user["faction_id"])
-        
-        target = db.get_user(self.new_leader_id.value)
-        if target["faction_id"] != user["faction_id"]:
-            await interaction.response.send_message("❌ Игрок не состоит в вашей фракции!", ephemeral=True)
-            return
-        
-        faction["leader_id"] = self.new_leader_id.value
-        db.update_user(interaction.user.id, rank="Советник")
-        db.update_user(self.new_leader_id.value, rank="Лидер")
-        db.save()
-        
-        await interaction.response.send_message(f"✅ Лидерство передано <@{self.new_leader_id.value}>!", ephemeral=True)
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 class AdminPanelView(View):
@@ -927,16 +990,38 @@ class DeleteFactionSelectView(View):
         await interaction.response.send_message(f"✅ Фракция **{faction['name']}** удалена!", ephemeral=True)
 
 class AdminReputationModal(Modal, title="Изменить репутацию"):
-    user_id = TextInput(label="ID пользователя", placeholder="Discord ID", required=True)
+    user_mention = TextInput(label="Игрок", placeholder="@Игрок или никнейм", required=True)
     amount = TextInput(label="Количество", placeholder="Положительное или отрицательное число", required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         try:
             amount = int(self.amount.value)
-            user = db.get_user(self.user_id.value)
+            
+            # Поиск пользователя
+            target = None
+            mention = self.user_mention.value.strip()
+            
+            if mention.startswith('<@') and mention.endswith('>'):
+                user_id = mention.strip('<@!>')
+                try:
+                    target = await interaction.client.fetch_user(int(user_id))
+                except:
+                    pass
+            
+            if not target:
+                for member in interaction.guild.members:
+                    if member.name.lower() == mention.lower() or member.display_name.lower() == mention.lower():
+                        target = member
+                        break
+            
+            if not target:
+                await interaction.response.send_message("❌ Пользователь не найден!", ephemeral=True)
+                return
+            
+            user = db.get_user(target.id)
             new_rep = user["reputation"] + amount
-            db.update_user(self.user_id.value, reputation=new_rep)
-            await interaction.response.send_message(f"✅ Репутация <@{self.user_id.value}> изменена на {new_rep}", ephemeral=True)
+            db.update_user(target.id, reputation=new_rep)
+            await interaction.response.send_message(f"✅ Репутация {target.mention} изменена на {new_rep}", ephemeral=True)
         except ValueError:
             await interaction.response.send_message("❌ Количество должно быть числом!", ephemeral=True)
 
@@ -949,11 +1034,9 @@ class FactionBot(discord.Client):
     async def setup_hook(self):
         await self.tree.sync()
         print("✅ Команды синхронизированы")
-        # Запускаем фоновую задачу ПОСЛЕ создания бота
         asyncio.create_task(self.check_npc_work_background())
 
     async def check_npc_work_background(self):
-        """Фоновая задача для проверки завершения работ NPC"""
         await self.wait_until_ready()
         while not self.is_closed():
             completed = db.check_completed_works()
@@ -969,14 +1052,13 @@ class FactionBot(discord.Client):
                         faction["resources"] = resources
                         db.save()
                         
-                        # Отправка уведомления в канал фракции
                         try:
                             channel_id = int(faction["base_channel"])
                             channel = self.get_channel(channel_id)
                             if channel:
                                 await channel.send(f"✅ {npc['name']} завершил работу и принёс ресурсы: {reward}")
                         except:
-                            pass  # Если канал не найден, просто игнорируем
+                            pass
             await asyncio.sleep(60)
 
 bot = FactionBot()
