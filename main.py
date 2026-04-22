@@ -4,6 +4,7 @@ from discord.ui import Button, View, Modal, TextInput, Select
 import json
 import os
 import asyncio
+import random
 from typing import Optional, List, Dict
 from datetime import datetime, timedelta
 
@@ -33,7 +34,8 @@ class Database:
         return {
             "users": {},
             "factions": {},
-            "npcs": {}
+            "npcs": {},
+            "deposits": {}
         }
 
     def save(self):
@@ -47,17 +49,11 @@ class Database:
                 "faction_id": None,
                 "reputation": 0,
                 "rank": "Новичок",
-                "joined_at": None
+                "joined_at": None,
+                "deposits": []
             }
             self.save()
         return self.data["users"][user_id]
-
-    def get_user_by_name(self, name: str):
-        """Поиск пользователя по имени или упоминанию"""
-        name = name.lower().strip()
-        for uid in self.data["users"]:
-            return uid  # нужно передавать объект пользователя из Discord
-        return None
 
     def update_user(self, user_id: str, **kwargs):
         user_id = str(user_id)
@@ -112,7 +108,8 @@ class Database:
             "work_end_time": None,
             "loyalty": loyalty,
             "skill_level": skill_level,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "assigned_deposit": None
         }
         self.save()
         return npc_id
@@ -128,15 +125,41 @@ class Database:
             return True
         return False
     
+    def add_deposit(self, user_id: str, deposit_type: str, amount: int):
+        deposit_id = str(int(datetime.now().timestamp() * 1000))
+        self.data["deposits"][deposit_id] = {
+            "owner_id": str(user_id),
+            "type": deposit_type,
+            "amount": amount,
+            "assigned_npcs": [],
+            "discovered_at": datetime.now().isoformat(),
+            "is_active": True
+        }
+        
+        user = self.get_user(user_id)
+        if "deposits" not in user:
+            user["deposits"] = []
+        user["deposits"].append(deposit_id)
+        self.save()
+        return deposit_id
+    
+    def get_user_deposits(self, user_id: str) -> list:
+        user = self.get_user(user_id)
+        deposits = []
+        for dep_id in user.get("deposits", []):
+            if dep_id in self.data["deposits"] and self.data["deposits"][dep_id].get("is_active", True):
+                deposits.append((dep_id, self.data["deposits"][dep_id]))
+        return deposits
+    
     def check_completed_works(self):
         completed = []
         now = datetime.now()
         for nid, npc in self.data["npcs"].items():
-            if npc.get("is_working") and npc.get("work_end_time"):
+            if npc.get("is_working") and npc.get("work_end_time") and not npc.get("assigned_deposit"):
                 end_time = datetime.fromisoformat(npc["work_end_time"])
                 if now >= end_time:
                     npc["is_working"] = False
-                    reward = npc.get("work_reward", {"gold": 10, "wood": 5, "ore": 2})
+                    reward = npc.get("work_reward", {"gold": 10, "wood": 5, "stone": 2})
                     npc["job"] = None
                     npc["work_end_time"] = None
                     npc["work_reward"] = None
@@ -155,7 +178,6 @@ def is_admin(interaction: discord.Interaction) -> bool:
 
 # ==================== ФУНКЦИИ ДЛЯ ОТОБРАЖЕНИЯ ====================
 async def show_player_stats(interaction: discord.Interaction, target_user: discord.User):
-    """Публичная статистика игрока (видят все)"""
     user_data = db.get_user(target_user.id)
     faction = db.get_user_faction(target_user.id)
     
@@ -172,13 +194,14 @@ async def show_player_stats(interaction: discord.Interaction, target_user: disco
         embed.add_field(name="📈 Ступень", value=user_data["rank"], inline=True)
         embed.add_field(name="👑 Владеет фракцией?", value="Да" if db.is_faction_leader(target_user.id) else "Нет", inline=True)
         embed.add_field(name="📅 Вступил", value=joined_str, inline=True)
+        deposits = db.get_user_deposits(target_user.id)
+        embed.add_field(name="⛏️ Залежей найдено", value=str(len(deposits)), inline=True)
     else:
         embed.description = "```\n🚫 Не состоит ни в одной фракции\n```"
     
     await interaction.response.send_message(embed=embed, ephemeral=False)
 
 async def show_faction_members(interaction: discord.Interaction, faction_id: str):
-    """Список членов фракции (только для отправителя)"""
     faction = db.get_faction(faction_id)
     members = db.get_faction_members(faction_id)
     
@@ -202,7 +225,6 @@ async def show_faction_members(interaction: discord.Interaction, faction_id: str
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def show_faction_npcs(interaction: discord.Interaction, faction_id: str):
-    """Список NPC фракции (только для отправителя)"""
     faction = db.get_faction(faction_id)
     npcs = db.get_faction_npcs(faction_id)
     
@@ -215,7 +237,8 @@ async def show_faction_npcs(interaction: discord.Interaction, faction_id: str):
         npc = db.data["npcs"][nid]
         work_status = "🔨 Работает" if npc.get("is_working") else "💤 Свободен"
         work_info = f" ({npc.get('job', 'Нет работы')})" if npc.get("job") else ""
-        description += f"**{npc['name']}** — {work_status}{work_info}, лояльность: {npc.get('loyalty', 50)}%\n"
+        deposit_info = f" [⛏️ Залежа]" if npc.get("assigned_deposit") else ""
+        description += f"**{npc['name']}** — {work_status}{work_info}{deposit_info}, лояльность: {npc.get('loyalty', 50)}%\n"
         if len(description) > 3900:
             description += "..."
             break
@@ -228,25 +251,33 @@ async def show_faction_npcs(interaction: discord.Interaction, faction_id: str):
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def show_faction_economy(interaction: discord.Interaction, faction_id: str):
-    """Экономика фракции (только для отправителя)"""
     faction = db.get_faction(faction_id)
+    members = db.get_faction_members(faction_id)
+    npcs = db.get_faction_npcs(faction_id)
     
     embed = discord.Embed(
         title=f"💰 Экономика {faction['name']}",
         color=discord.Color.gold()
     )
     
-    resources = faction.get("resources", {"gold": 0, "wood": 0, "ore": 0})
+    resources = faction.get("resources", {"gold": 0, "wood": 0, "stone": 0})
+    
+    embed.add_field(name="👥 Игроки", value=str(len(members)), inline=True)
+    embed.add_field(name="🤖 NPC", value=str(len(npcs)), inline=True)
+    embed.add_field(name="📊 Налог", value=f"{faction['tax']}%", inline=True)
     embed.add_field(name="💰 Золото", value=resources.get("gold", 0), inline=True)
     embed.add_field(name="🪵 Древесина", value=resources.get("wood", 0), inline=True)
-    embed.add_field(name="⛏️ Руда", value=resources.get("ore", 0), inline=True)
-    embed.add_field(name="📊 Налог", value=f"{faction['tax']}%", inline=True)
-    embed.add_field(name="💎 Валюта", value=faction["currency"], inline=True)
+    embed.add_field(name="🪨 Камень", value=resources.get("stone", 0), inline=True)
+    
+    total_resources = resources.get("wood", 0) + resources.get("stone", 0)
+    embed.add_field(name="📦 Всего ресурсов", value=str(total_resources), inline=True)
+    
+    power = len(members) * 10 + len(npcs) * 5 + (resources.get("gold", 0) // 100)
+    embed.add_field(name="⚔️ Сила фракции", value=str(power), inline=True)
     
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 async def show_faction_menu(interaction: discord.Interaction, target_user: discord.User):
-    """Публичная информация о фракции (видят все, кнопки только владельцу)"""
     user_data = db.get_user(target_user.id)
     
     if not user_data["faction_id"]:
@@ -276,11 +307,15 @@ async def show_faction_menu(interaction: discord.Interaction, target_user: disco
         color=color
     )
     
+    resources = faction.get("resources", {"wood": 0, "stone": 0})
+    
     embed.add_field(name="👑 Лидер", value=f"<@{faction['leader_id']}>", inline=True)
     embed.add_field(name="📊 Тип", value=faction.get("type", "торговая").capitalize(), inline=True)
     embed.add_field(name="💰 Налог", value=f"{faction['tax']}%", inline=True)
-    embed.add_field(name="👥 Игроков", value=f"{len(members)}/{faction['max_players']}", inline=True)
+    embed.add_field(name="👥 Игроков", value=str(len(members)), inline=True)
     embed.add_field(name="🤖 NPC", value=str(len(npcs)), inline=True)
+    embed.add_field(name="🪵 Древесина", value=resources.get("wood", 0), inline=True)
+    embed.add_field(name="🪨 Камень", value=resources.get("stone", 0), inline=True)
     embed.add_field(name="💎 Валюта", value=faction["currency"], inline=True)
     embed.add_field(name="🏠 База", value=f"<#{faction['base_channel']}>", inline=True)
     embed.add_field(name="📜 Иерархия", value=" → ".join(faction["hierarchy"]), inline=False)
@@ -288,14 +323,181 @@ async def show_faction_menu(interaction: discord.Interaction, target_user: disco
     if faction.get("description"):
         embed.add_field(name="📝 Описание", value=faction["description"][:1024], inline=False)
     
-    # Только владелец меню видит кнопки (но само сообщение публичное)
     if interaction.user.id == target_user.id:
         view = FactionMenuView(interaction.user.id)
         await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
     else:
         await interaction.response.send_message(embed=embed, ephemeral=False)
 
+async def show_deposits_list(interaction: discord.Interaction, target_user: discord.User):
+    deposits = db.get_user_deposits(target_user.id)
+    
+    if not deposits:
+        embed = discord.Embed(
+            title="⛏️ ВАШИ ЗАЛЕЖИ",
+            description="```\n🚫 У вас нет найденных залежей\nИспользуйте /найти [камень/дерево]\n```",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        return
+    
+    description = ""
+    deposit_list = []
+    for dep_id, deposit in deposits:
+        resource_icon = "🪵" if deposit["type"] == "дерево" else "🪨"
+        assigned_npcs = len(deposit.get("assigned_npcs", []))
+        description += f"{resource_icon} **{deposit['type'].capitalize()}** — осталось: {deposit['amount']}, 👷 рабочих: {assigned_npcs}/5\n"
+        deposit_list.append((dep_id, deposit))
+    
+    embed = discord.Embed(
+        title="⛏️ ВАШИ ЗАЛЕЖИ",
+        description=description[:4000],
+        color=discord.Color.blue()
+    )
+    
+    view = DepositsView(target_user.id, deposit_list)
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
 # ==================== КНОПКИ И МЕНЮ ====================
+class DepositsView(View):
+    def __init__(self, user_id: int, deposits: list):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.deposits = deposits
+        
+        if deposits:
+            options = []
+            for dep_id, deposit in deposits[:25]:
+                icon = "🪵" if deposit["type"] == "дерево" else "🪨"
+                options.append(discord.SelectOption(
+                    label=f"{icon} {deposit['type'].capitalize()}", 
+                    value=dep_id,
+                    description=f"Осталось: {deposit['amount']}"
+                ))
+            
+            select = Select(placeholder="Выберите залежу для управления", options=options)
+            select.callback = self.deposit_selected
+            self.add_item(select)
+    
+    async def deposit_selected(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это не ваши залежи!", ephemeral=True)
+            return
+        
+        deposit_id = interaction.data["values"][0]
+        deposit = db.data["deposits"].get(deposit_id)
+        
+        if not deposit or not deposit.get("is_active", True):
+            await interaction.response.send_message("❌ Эта залежа уже истощена!", ephemeral=True)
+            return
+        
+        view = DepositManageView(self.user_id, deposit_id, deposit)
+        embed = discord.Embed(
+            title=f"⛏️ Управление залежью: {deposit['type'].capitalize()}",
+            description=f"📦 Осталось ресурсов: {deposit['amount']}\n👷 Рабочих NPC: {len(deposit.get('assigned_npcs', []))}/5\n\nВыберите действие:",
+            color=discord.Color.gold()
+        )
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class DepositManageView(View):
+    def __init__(self, user_id: int, deposit_id: str, deposit: dict):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.deposit_id = deposit_id
+        self.deposit = deposit
+    
+    @discord.ui.button(label="👷 Назначить NPC", style=discord.ButtonStyle.primary)
+    async def assign_npc(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это не ваша залежа!", ephemeral=True)
+            return
+        
+        user = db.get_user(self.user_id)
+        if not user["faction_id"]:
+            await interaction.response.send_message("❌ Вы не состоите во фракции!", ephemeral=True)
+            return
+        
+        faction_npcs = db.get_faction_npcs(user["faction_id"])
+        free_npcs = []
+        for nid in faction_npcs:
+            npc = db.data["npcs"][nid]
+            if not npc.get("is_working") and not npc.get("assigned_deposit"):
+                free_npcs.append(nid)
+        
+        if not free_npcs:
+            await interaction.response.send_message("❌ Нет свободных NPC для работы!", ephemeral=True)
+            return
+        
+        current_assigned = len(self.deposit.get("assigned_npcs", []))
+        if current_assigned >= 5:
+            await interaction.response.send_message("❌ На этой залеже уже работает максимальное количество NPC (5)!", ephemeral=True)
+            return
+        
+        view = AssignNPCToDepositView(self.user_id, self.deposit_id, free_npcs)
+        await interaction.response.send_message("Выберите NPC для работы на залеже:", view=view, ephemeral=True)
+    
+    @discord.ui.button(label="📊 Статистика", style=discord.ButtonStyle.secondary)
+    async def stats(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это не ваша залежа!", ephemeral=True)
+            return
+        
+        assigned = self.deposit.get("assigned_npcs", [])
+        production_per_hour = len(assigned) * 50
+        
+        embed = discord.Embed(
+            title=f"📊 Статистика залежи {self.deposit['type'].capitalize()}",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="📦 Остаток ресурсов", value=self.deposit['amount'], inline=True)
+        embed.add_field(name="👷 Рабочих NPC", value=f"{len(assigned)}/5", inline=True)
+        embed.add_field(name="⚙️ Добыча в час", value=f"{production_per_hour} ед.", inline=True)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class AssignNPCToDepositView(View):
+    def __init__(self, user_id: int, deposit_id: str, npc_ids: list):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.deposit_id = deposit_id
+        
+        options = []
+        for nid in npc_ids[:25]:
+            npc = db.data["npcs"][nid]
+            options.append(discord.SelectOption(label=npc['name'], value=nid))
+        
+        select = Select(placeholder="Выберите NPC для работы", options=options)
+        select.callback = self.npc_selected
+        self.add_item(select)
+    
+    async def npc_selected(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Это не ваше меню!", ephemeral=True)
+            return
+        
+        npc_id = interaction.data["values"][0]
+        npc = db.data["npcs"][npc_id]
+        deposit = db.data["deposits"].get(self.deposit_id)
+        
+        if not deposit or not deposit.get("is_active", True):
+            await interaction.response.send_message("❌ Залежа уже истощена!", ephemeral=True)
+            return
+        
+        if len(deposit.get("assigned_npcs", [])) >= 5:
+            await interaction.response.send_message("❌ Максимум NPC на залеже достигнут!", ephemeral=True)
+            return
+        
+        if "assigned_npcs" not in deposit:
+            deposit["assigned_npcs"] = []
+        
+        deposit["assigned_npcs"].append(npc_id)
+        npc["assigned_deposit"] = self.deposit_id
+        npc["is_working"] = True
+        npc["work_end_time"] = (datetime.now() + timedelta(hours=1)).isoformat()
+        db.save()
+        
+        await interaction.response.send_message(f"✅ {npc['name']} назначен на работу на залежу! Он будет приносить 50 ресурсов в час.", ephemeral=True)
+
 class MainMenuView(View):
     def __init__(self, user_id: int):
         super().__init__(timeout=60)
@@ -512,11 +714,86 @@ class NPCManageView(View):
         view = FireNPCSelectView(self.user_id, npcs)
         await interaction.response.send_message("Выберите NPC для увольнения:", view=view, ephemeral=True)
 
-# ==================== МОДАЛЬНЫЕ ОКНА ====================
+class AssignWorkSelectView(View):
+    def __init__(self, user_id: int, npcs: list):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        options = []
+        for nid in npcs[:25]:
+            npc = db.data["npcs"][nid]
+            status = "🔨" if npc.get("is_working") else "💤"
+            options.append(discord.SelectOption(label=f"{status} {npc['name']}", value=nid))
+        
+        select = Select(placeholder="Выберите NPC", options=options)
+        select.callback = self.npc_selected
+        self.add_item(select)
+    
+    async def npc_selected(self, interaction: discord.Interaction):
+        npc_id = interaction.data["values"][0]
+        npc = db.data["npcs"][npc_id]
+        
+        if npc.get("is_working"):
+            await interaction.response.send_message("❌ Этот NPC уже работает!", ephemeral=True)
+            return
+        
+        view = WorkTypeSelectView(self.user_id, npc_id)
+        embed = discord.Embed(title=f"📋 Выберите работу для {npc['name']}", color=discord.Color.blue())
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class WorkTypeSelectView(View):
+    def __init__(self, user_id: int, npc_id: str):
+        super().__init__(timeout=60)
+        self.user_id = user_id
+        self.npc_id = npc_id
+        
+        self.jobs = {
+            "🌲 Лесоруб": {"hours": 2, "reward": {"wood": 10}},
+            "⛏️ Шахтёр": {"hours": 2, "reward": {"stone": 8}},
+            "💰 Сборщик налогов": {"hours": 3, "reward": {"gold": 15}},
+            "🏛️ Строитель": {"hours": 4, "reward": {"wood": 5, "stone": 5}}
+        }
+        
+        select = Select(placeholder="Выберите работу", options=[
+            discord.SelectOption(label=name, description=f"{data['hours']} часа(ов)", value=name)
+            for name, data in self.jobs.items()
+        ])
+        select.callback = self.work_selected
+        self.add_item(select)
+    
+    async def work_selected(self, interaction: discord.Interaction):
+        job_name = interaction.data["values"][0]
+        job = self.jobs[job_name]
+        
+        db.assign_npc_work(self.npc_id, job_name, job["hours"], job["reward"])
+        
+        npc = db.data["npcs"][self.npc_id]
+        await interaction.response.send_message(f"✅ {npc['name']} отправлен на работу **{job_name}** на {job['hours']} часа(ов)!", ephemeral=True)
+
+class FireNPCSelectView(View):
+    def __init__(self, user_id: int, npcs: list):
+        super().__init__(timeout=60)
+        options = []
+        for nid in npcs[:25]:
+            npc = db.data["npcs"][nid]
+            options.append(discord.SelectOption(label=npc['name'], value=nid))
+        
+        select = Select(placeholder="Выберите NPC для увольнения", options=options)
+        select.callback = self.fire_callback
+        self.add_item(select)
+    
+    async def fire_callback(self, interaction: discord.Interaction):
+        npc_id = interaction.data["values"][0]
+        npc = db.data["npcs"][npc_id]
+        name = npc['name']
+        
+        del db.data["npcs"][npc_id]
+        db.save()
+        
+        await interaction.response.send_message(f"✅ NPC **{name}** уволен!", ephemeral=True)# ==================== МОДАЛЬНЫЕ ОКНА ====================
 class CreateFactionModal(Modal, title="Создание фракции"):
     name = TextInput(label="Название фракции", placeholder="3-30 символов", max_length=30, min_length=3)
     max_players = TextInput(label="Максимум игроков", placeholder="5-100", default="20")
-    base_channel = TextInput(label="Канал базы", placeholder="#название-канала", required=True)
+    base_channel = TextInput(label="Название канала базы", placeholder="название-канала", required=True)
     currency = TextInput(label="Название валюты", placeholder="Например: монеты", default="монеты")
     flag = TextInput(label="Флаг (эмодзи)", placeholder="🏴", required=False, max_length=5)
     tax = TextInput(label="Налог %", placeholder="0-15", default="5")
@@ -530,7 +807,6 @@ class CreateFactionModal(Modal, title="Создание фракции"):
             await interaction.response.send_message("❌ Вы уже состоите во фракции!", ephemeral=True)
             return
         
-        # Поиск канала по названию
         channel_name = self.base_channel.value.strip().lstrip('#')
         channel = None
         for ch in interaction.guild.text_channels:
@@ -580,7 +856,7 @@ class CreateFactionModal(Modal, title="Создание фракции"):
             "color": self.color.value,
             "description": "Новая фракция",
             "created_at": datetime.now().isoformat(),
-            "resources": {"gold": 100, "wood": 50, "ore": 50},
+            "resources": {"gold": 100, "wood": 50, "stone": 50},
             "hierarchy": ["Новичок", "Боец", "Советник", "Лидер"]
         }
         
@@ -594,6 +870,46 @@ class CreateFactionModal(Modal, title="Создание фракции"):
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+class HireNPCModal(Modal, title="Наём NPC"):
+    name = TextInput(label="Имя NPC", placeholder="Например: Лесоруб Петя", max_length=30, min_length=2)
+    loyalty = TextInput(label="Лояльность (0-100)", placeholder="50", default="50")
+    skill = TextInput(label="Уровень навыка (1-10)", placeholder="1", default="1")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        user = db.get_user(interaction.user.id)
+        if not user["faction_id"]:
+            await interaction.response.send_message("❌ Вы не состоите во фракции!", ephemeral=True)
+            return
+        
+        try:
+            loyalty = int(self.loyalty.value)
+            if loyalty < 0 or loyalty > 100:
+                raise ValueError
+        except:
+            loyalty = 50
+        
+        try:
+            skill = int(self.skill.value)
+            if skill < 1 or skill > 10:
+                raise ValueError
+        except:
+            skill = 1
+        
+        faction = db.get_faction(user["faction_id"])
+        resources = faction.get("resources", {"gold": 0})
+        
+        hire_cost = 50
+        if resources.get("gold", 0) < hire_cost:
+            await interaction.response.send_message(f"❌ Недостаточно золота! Нужно {hire_cost} {faction['currency']}", ephemeral=True)
+            return
+        
+        resources["gold"] = resources.get("gold", 0) - hire_cost
+        faction["resources"] = resources
+        
+        db.add_npc(user["faction_id"], self.name.value, None, loyalty, skill)
+        
+        await interaction.response.send_message(f"✅ NPC **{self.name.value}** нанят за {hire_cost} {faction['currency']}!\nЛояльность: {loyalty}, Навык: {skill}", ephemeral=True)
 
 class InvitePlayerModal(Modal, title="Пригласить игрока"):
     user_mention = TextInput(label="Упоминание игрока", placeholder="@Игрок или никнейм", required=True)
@@ -611,11 +927,9 @@ class InvitePlayerModal(Modal, title="Пригласить игрока"):
             await interaction.response.send_message(f"❌ Фракция достигла лимита в {faction['max_players']} игроков!", ephemeral=True)
             return
         
-        # Поиск пользователя по упоминанию или никнейму
         target = None
         mention = self.user_mention.value.strip()
         
-        # Пробуем извлечь ID из упоминания
         if mention.startswith('<@') and mention.endswith('>'):
             user_id = mention.strip('<@!>')
             try:
@@ -623,7 +937,6 @@ class InvitePlayerModal(Modal, title="Пригласить игрока"):
             except:
                 pass
         
-        # Если не нашли, ищем по имени
         if not target:
             for member in interaction.guild.members:
                 if member.name.lower() == mention.lower() or member.display_name.lower() == mention.lower():
@@ -686,7 +999,6 @@ class ChangeRankModal(Modal, title="Изменить ступень"):
             await interaction.response.send_message("❌ Только лидер может менять ступени!", ephemeral=True)
             return
         
-        # Поиск пользователя
         target = None
         mention = self.user_mention.value.strip()
         
@@ -755,7 +1067,6 @@ class TransferLeadershipModal(Modal, title="Передать лидерство"
             await interaction.response.send_message("❌ Только лидер может передать лидерство!", ephemeral=True)
             return
         
-        # Поиск пользователя
         target = None
         mention = self.new_leader.value.strip()
         
@@ -790,123 +1101,6 @@ class TransferLeadershipModal(Modal, title="Передать лидерство"
         db.save()
         
         await interaction.response.send_message(f"✅ Лидерство передано {target.mention}!", ephemeral=True)
-
-class HireNPCModal(Modal, title="Наём NPC"):
-    name = TextInput(label="Имя NPC", placeholder="Например: Лесоруб Петя", max_length=30, min_length=2)
-    loyalty = TextInput(label="Лояльность (0-100)", placeholder="50", default="50")
-    skill = TextInput(label="Уровень навыка (1-10)", placeholder="1", default="1")
-
-    async def on_submit(self, interaction: discord.Interaction):
-        user = db.get_user(interaction.user.id)
-        if not user["faction_id"]:
-            await interaction.response.send_message("❌ Вы не состоите во фракции!", ephemeral=True)
-            return
-        
-        try:
-            loyalty = int(self.loyalty.value)
-            if loyalty < 0 or loyalty > 100:
-                raise ValueError
-        except:
-            loyalty = 50
-        
-        try:
-            skill = int(self.skill.value)
-            if skill < 1 or skill > 10:
-                raise ValueError
-        except:
-            skill = 1
-        
-        faction = db.get_faction(user["faction_id"])
-        resources = faction.get("resources", {"gold": 0})
-        
-        hire_cost = 50
-        if resources.get("gold", 0) < hire_cost:
-            await interaction.response.send_message(f"❌ Недостаточно золота! Нужно {hire_cost} {faction['currency']}", ephemeral=True)
-            return
-        
-        resources["gold"] = resources.get("gold", 0) - hire_cost
-        faction["resources"] = resources
-        
-        npc_id = db.add_npc(user["faction_id"], self.name.value, None, loyalty, skill)
-        
-        await interaction.response.send_message(f"✅ NPC **{self.name.value}** нанят за {hire_cost} {faction['currency']}!\nЛояльность: {loyalty}, Навык: {skill}", ephemeral=True)
-
-class AssignWorkSelectView(View):
-    def __init__(self, user_id: int, npcs: list):
-        super().__init__(timeout=60)
-        self.user_id = user_id
-        options = []
-        for nid in npcs[:25]:
-            npc = db.data["npcs"][nid]
-            status = "🔨" if npc.get("is_working") else "💤"
-            options.append(discord.SelectOption(label=f"{status} {npc['name']}", value=nid))
-        
-        select = Select(placeholder="Выберите NPC", options=options)
-        select.callback = self.npc_selected
-        self.add_item(select)
-    
-    async def npc_selected(self, interaction: discord.Interaction):
-        npc_id = interaction.data["values"][0]
-        npc = db.data["npcs"][npc_id]
-        
-        if npc.get("is_working"):
-            await interaction.response.send_message("❌ Этот NPC уже работает!", ephemeral=True)
-            return
-        
-        view = WorkTypeSelectView(self.user_id, npc_id)
-        embed = discord.Embed(title=f"📋 Выберите работу для {npc['name']}", color=discord.Color.blue())
-        await interaction.response.edit_message(embed=embed, view=view)
-
-class WorkTypeSelectView(View):
-    def __init__(self, user_id: int, npc_id: str):
-        super().__init__(timeout=60)
-        self.user_id = user_id
-        self.npc_id = npc_id
-        
-        self.jobs = {
-            "🌲 Лесоруб": {"hours": 2, "reward": {"wood": 10}},
-            "⛏️ Шахтёр": {"hours": 2, "reward": {"ore": 8}},
-            "💰 Сборщик налогов": {"hours": 3, "reward": {"gold": 15}},
-            "🏛️ Строитель": {"hours": 4, "reward": {"wood": 5, "ore": 5}}
-        }
-        
-        select = Select(placeholder="Выберите работу", options=[
-            discord.SelectOption(label=name, description=f"{data['hours']} часа(ов)", value=name)
-            for name, data in self.jobs.items()
-        ])
-        select.callback = self.work_selected
-        self.add_item(select)
-    
-    async def work_selected(self, interaction: discord.Interaction):
-        job_name = interaction.data["values"][0]
-        job = self.jobs[job_name]
-        
-        db.assign_npc_work(self.npc_id, job_name, job["hours"], job["reward"])
-        
-        npc = db.data["npcs"][self.npc_id]
-        await interaction.response.send_message(f"✅ {npc['name']} отправлен на работу **{job_name}** на {job['hours']} часа(ов)!", ephemeral=True)
-
-class FireNPCSelectView(View):
-    def __init__(self, user_id: int, npcs: list):
-        super().__init__(timeout=60)
-        options = []
-        for nid in npcs[:25]:
-            npc = db.data["npcs"][nid]
-            options.append(discord.SelectOption(label=npc['name'], value=nid))
-        
-        select = Select(placeholder="Выберите NPC для увольнения", options=options)
-        select.callback = self.fire_callback
-        self.add_item(select)
-    
-    async def fire_callback(self, interaction: discord.Interaction):
-        npc_id = interaction.data["values"][0]
-        npc = db.data["npcs"][npc_id]
-        name = npc['name']
-        
-        del db.data["npcs"][npc_id]
-        db.save()
-        
-        await interaction.response.send_message(f"✅ NPC **{name}** уволен!", ephemeral=True)
 
 # ==================== АДМИН-ПАНЕЛЬ ====================
 class AdminPanelView(View):
@@ -997,7 +1191,6 @@ class AdminReputationModal(Modal, title="Изменить репутацию"):
         try:
             amount = int(self.amount.value)
             
-            # Поиск пользователя
             target = None
             mention = self.user_mention.value.strip()
             
@@ -1025,6 +1218,83 @@ class AdminReputationModal(Modal, title="Изменить репутацию"):
         except ValueError:
             await interaction.response.send_message("❌ Количество должно быть числом!", ephemeral=True)
 
+# ==================== ФОНОВЫЕ ЗАДАЧИ ====================
+async def deposit_harvesting_background(bot_instance):
+    await bot_instance.wait_until_ready()
+    while not bot_instance.is_closed():
+        for dep_id, deposit in list(db.data["deposits"].items()):
+            if not deposit.get("is_active", True):
+                continue
+            
+            assigned_npcs = deposit.get("assigned_npcs", [])
+            if assigned_npcs:
+                harvested = len(assigned_npcs) * 50
+                deposit["amount"] -= harvested
+                
+                owner_id = deposit["owner_id"]
+                user = db.get_user(owner_id)
+                if user["faction_id"]:
+                    faction = db.get_faction(user["faction_id"])
+                    if faction:
+                        resources = faction.get("resources", {"wood": 0, "stone": 0})
+                        resource_key = "wood" if deposit["type"] == "дерево" else "stone"
+                        resources[resource_key] = resources.get(resource_key, 0) + harvested
+                        faction["resources"] = resources
+                
+                if deposit["amount"] <= 0:
+                    deposit["is_active"] = False
+        
+        db.save()
+        
+        now = datetime.now()
+        for nid, npc in db.data["npcs"].items():
+            if npc.get("assigned_deposit") and npc.get("work_end_time"):
+                end_time = datetime.fromisoformat(npc["work_end_time"])
+                if now >= end_time:
+                    npc["is_working"] = False
+                    npc["assigned_deposit"] = None
+                    npc["work_end_time"] = None
+        
+        db.save()
+        await asyncio.sleep(3600)
+
+async def complete_deposit_search(bot_instance, user_id: int, resource_type: str, npc_ids: list):
+    await asyncio.sleep(3600)
+    
+    for nid in npc_ids:
+        npc = db.data["npcs"].get(nid)
+        if npc:
+            npc["is_working"] = False
+            npc["job"] = None
+            npc["work_end_time"] = None
+    
+    if random.random() < 0.3:
+        amount = random.randint(50, 300)
+        if random.random() < 0.2:
+            amount = random.randint(500, 1000)
+        
+        db.add_deposit(user_id, resource_type, amount)
+        
+        user = await bot_instance.fetch_user(user_id)
+        if user:
+            embed = discord.Embed(
+                title="✅ ПОИСК ЗАВЕРШЁН!",
+                description=f"Твои NPC нашли залежь **{resource_type}**!\n📦 Количество ресурсов: {amount}\nИспользуй `/залежи` чтобы управлять.",
+                color=discord.Color.green()
+            )
+            await user.send(embed=embed)
+    else:
+        user = await bot_instance.fetch_user(user_id)
+        if user:
+            embed = discord.Embed(
+                title="❌ ПОИСК ЗАВЕРШЁН",
+                description=f"К сожалению, NPC не нашли залежей {resource_type}. Попробуй снова!",
+                color=discord.Color.red()
+            )
+            await user.send(embed=embed)
+    
+    db.save()
+
 # ==================== КОМАНДЫ БОТА ====================
 class FactionBot(discord.Client):
     def __init__(self):
@@ -1035,6 +1305,7 @@ class FactionBot(discord.Client):
         await self.tree.sync()
         print("✅ Команды синхронизированы")
         asyncio.create_task(self.check_npc_work_background())
+        asyncio.create_task(deposit_harvesting_background(self))
 
     async def check_npc_work_background(self):
         await self.wait_until_ready()
@@ -1045,10 +1316,10 @@ class FactionBot(discord.Client):
                 if npc:
                     faction = db.get_faction(npc["faction_id"])
                     if faction:
-                        resources = faction.get("resources", {"gold": 0, "wood": 0, "ore": 0})
+                        resources = faction.get("resources", {"gold": 0, "wood": 0, "stone": 0})
                         resources["gold"] = resources.get("gold", 0) + reward.get("gold", 0)
                         resources["wood"] = resources.get("wood", 0) + reward.get("wood", 0)
-                        resources["ore"] = resources.get("ore", 0) + reward.get("ore", 0)
+                        resources["stone"] = resources.get("stone", 0) + reward.get("stone", 0)
                         faction["resources"] = resources
                         db.save()
                         
@@ -1063,11 +1334,7 @@ class FactionBot(discord.Client):
 
 bot = FactionBot()
 
-@bot.event
-async def on_ready():
-    print(f"✅ Бот {bot.user} запущен!")
-    print(f"📡 На серверах: {len(bot.guilds)}")
-
+# ==================== КОМАНДЫ ====================
 @bot.tree.command(name="меню", description="Главное меню")
 async def menu_command(interaction: discord.Interaction):
     embed = discord.Embed(title="🎮 ГЛАВНОЕ МЕНЮ", description="Выберите действие:", color=discord.Color.blue())
@@ -1176,6 +1443,54 @@ async def transfer_leader_command(interaction: discord.Interaction, новый_�
     db.save()
     
     await interaction.response.send_message(f"✅ Лидерство передано {новый_лидер.mention}!", ephemeral=True)
+
+@bot.tree.command(name="найти", description="Найти залежи ресурсов (требует 3 NPC и 1 час)")
+@app_commands.describe(тип="Тип ресурса: дерево или камень")
+async def find_deposit_command(interaction: discord.Interaction, тип: str):
+    user = db.get_user(interaction.user.id)
+    
+    if not user["faction_id"]:
+        await interaction.response.send_message("❌ Вы не состоите во фракции!", ephemeral=True)
+        return
+    
+    тип = тип.lower()
+    if тип not in ["дерево", "камень"]:
+        await interaction.response.send_message("❌ Тип должен быть 'дерево' или 'камень'!", ephemeral=True)
+        return
+    
+    faction_npcs = db.get_faction_npcs(user["faction_id"])
+    free_npcs = []
+    for nid in faction_npcs:
+        npc = db.data["npcs"][nid]
+        if not npc.get("is_working") and not npc.get("assigned_deposit"):
+            free_npcs.append(nid)
+    
+    if len(free_npcs) < 3:
+        await interaction.response.send_message(f"❌ Недостаточно свободных NPC! Нужно 3, есть {len(free_npcs)}", ephemeral=True)
+        return
+    
+    for nid in free_npcs[:3]:
+        npc = db.data["npcs"][nid]
+        npc["is_working"] = True
+        npc["job"] = f"Поиск {тип}"
+        npc["work_end_time"] = (datetime.now() + timedelta(hours=1)).isoformat()
+    
+    db.save()
+    
+    asyncio.create_task(complete_deposit_search(bot, interaction.user.id, тип, free_npcs[:3]))
+    
+    await interaction.response.send_message(f"🔍 Отправлены 3 NPC на поиск залежей {типа}! Они вернутся через 1 час.", ephemeral=True)
+
+@bot.tree.command(name="залежи", description="Показать ваши залежи ресурсов")
+@app_commands.describe(игрок="Игрок для просмотра (только для себя)")
+async def deposits_command(interaction: discord.Interaction, игрок: Optional[discord.User] = None):
+    target = игрок or interaction.user
+    
+    if target.id != interaction.user.id:
+        await interaction.response.send_message("❌ Только владелец может смотреть свои залежи!", ephemeral=True)
+        return
+    
+    await show_deposits_list(interaction, target)
 
 @bot.tree.command(name="админ", description="Админ-панель")
 async def admin_command(interaction: discord.Interaction):
