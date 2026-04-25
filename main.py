@@ -1,3 +1,5 @@
+# ==================== ЧАСТЬ 1/2 - База данных, функции и кнопки ====================
+
 import discord
 from discord import app_commands
 from discord.ui import Button, View, Modal, TextInput, Select
@@ -316,7 +318,7 @@ async def show_faction_menu(interaction: discord.Interaction, target_user: disco
     embed.add_field(name="🤖 NPC", value=str(len(npcs)), inline=True)
     embed.add_field(name="🪵 Древесина", value=resources.get("wood", 0), inline=True)
     embed.add_field(name="🪨 Камень", value=resources.get("stone", 0), inline=True)
-    embed.add_field(name="💎 Валюта", value=faction["currency"], inline=True)
+    embed.add_field(name="💎 Валюта", value=faction["currency_name"], inline=True)
     embed.add_field(name="🏠 База", value=f"<#{faction['base_channel']}>", inline=True)
     embed.add_field(name="📜 Иерархия", value=" → ".join(faction["hierarchy"]), inline=False)
     
@@ -789,16 +791,15 @@ class FireNPCSelectView(View):
         del db.data["npcs"][npc_id]
         db.save()
         
-        await interaction.response.send_message(f"✅ NPC **{name}** уволен!", ephemeral=True)# ==================== МОДАЛЬНЫЕ ОКНА ====================
+        await interaction.response.send_message(f"✅ NPC **{name}** уволен!", ephemeral=True)# ==================== ЧАСТЬ 2/2 - Модальные окна, админ-панель, команды и запуск ====================
+
+# ==================== МОДАЛЬНЫЕ ОКНА ====================
 class CreateFactionModal(Modal, title="Создание фракции"):
     name = TextInput(label="Название фракции", placeholder="3-30 символов", max_length=30, min_length=3)
-    max_players = TextInput(label="Максимум игроков", placeholder="5-100", default="20")
-    base_channel = TextInput(label="Название канала базы", placeholder="название-канала", required=True)
-    currency = TextInput(label="Название валюты", placeholder="Например: монеты", default="монеты")
-    flag = TextInput(label="Флаг (эмодзи)", placeholder="🏴", required=False, max_length=5)
+    base_channel = TextInput(label="Название канала базы", placeholder="название-канала (без #)", required=True)
+    currency_name = TextInput(label="Название валюты", placeholder="Например: монеты", default="монеты")
     tax = TextInput(label="Налог %", placeholder="0-15", default="5")
     faction_type = TextInput(label="Тип фракции", placeholder="торговая/военная/строительная", default="торговая")
-    color = TextInput(label="Цвет (HEX)", placeholder="#2b2d31", default="#2b2d31", required=False)
 
     async def on_submit(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
@@ -807,22 +808,21 @@ class CreateFactionModal(Modal, title="Создание фракции"):
             await interaction.response.send_message("❌ Вы уже состоите во фракции!", ephemeral=True)
             return
         
+        # Поиск канала
         channel_name = self.base_channel.value.strip().lstrip('#')
-        channel = None
-        for ch in interaction.guild.text_channels:
-            if ch.name == channel_name:
-                channel = ch
-                break
+        channel = discord.utils.get(interaction.guild.text_channels, name=channel_name)
         
         if not channel:
-            await interaction.response.send_message(f"❌ Канал #{channel_name} не найден на сервере!", ephemeral=True)
+            await interaction.response.send_message(f"❌ Канал с названием '{channel_name}' не найден!", ephemeral=True)
             return
         
+        # Проверка уникальности названия
         fid, _ = db.get_faction_by_name(self.name.value)
         if fid:
             await interaction.response.send_message("❌ Фракция с таким названием уже существует!", ephemeral=True)
             return
         
+        # Проверка налога
         try:
             tax = int(self.tax.value)
             if tax < 0 or tax > 15:
@@ -831,32 +831,26 @@ class CreateFactionModal(Modal, title="Создание фракции"):
             await interaction.response.send_message("❌ Налог должен быть числом от 0 до 15!", ephemeral=True)
             return
         
-        try:
-            max_players = int(self.max_players.value)
-            if max_players < 5 or max_players > 100:
-                raise ValueError
-        except:
-            await interaction.response.send_message("❌ Максимум игроков должен быть от 5 до 100!", ephemeral=True)
-            return
-        
+        # Тип фракции
         faction_type = self.faction_type.value.lower()
         if faction_type not in ["торговая", "военная", "строительная"]:
             faction_type = "торговая"
         
+        # Создаём фракцию
         faction_id = str(int(datetime.now().timestamp()))
         faction_data = {
             "name": self.name.value,
             "leader_id": user_id,
-            "max_players": max_players,
+            "max_players": 20,
             "base_channel": str(channel.id),
-            "currency": self.currency.value,
-            "flag": self.flag.value or "🏛️",
+            "currency_name": self.currency_name.value,
+            "flag": "🏛️",
             "tax": tax,
             "type": faction_type,
-            "color": self.color.value,
+            "color": "#2b2d31",
             "description": "Новая фракция",
             "created_at": datetime.now().isoformat(),
-            "resources": {"gold": 100, "wood": 50, "stone": 50},
+            "resources": {"gold": 100, "wood": 0, "stone": 0},
             "hierarchy": ["Новичок", "Боец", "Советник", "Лидер"]
         }
         
@@ -866,10 +860,11 @@ class CreateFactionModal(Modal, title="Создание фракции"):
         
         embed = discord.Embed(
             title=f"✅ Фракция **{self.name.value}** создана!",
-            description=f"Ты стал Лидером!\n💰 Валюта: {self.currency.value}\n📊 Налог: {tax}%\n🏛️ Тип: {faction_type}\n🏠 База: {channel.mention}",
+            description=f"Ты стал Лидером!\n💰 Валюта: {self.currency_name.value}\n📊 Налог: {tax}%\n🏛️ Тип: {faction_type}\n🏠 База: {channel.mention}",
             color=discord.Color.green()
         )
         await interaction.response.send_message(embed=embed, ephemeral=True)
+        print(f"🏛️ {interaction.user.name} создал фракцию {self.name.value}")
 
 class HireNPCModal(Modal, title="Наём NPC"):
     name = TextInput(label="Имя NPC", placeholder="Например: Лесоруб Петя", max_length=30, min_length=2)
@@ -901,7 +896,7 @@ class HireNPCModal(Modal, title="Наём NPC"):
         
         hire_cost = 50
         if resources.get("gold", 0) < hire_cost:
-            await interaction.response.send_message(f"❌ Недостаточно золота! Нужно {hire_cost} {faction['currency']}", ephemeral=True)
+            await interaction.response.send_message(f"❌ Недостаточно золота! Нужно {hire_cost} {faction['currency_name']}", ephemeral=True)
             return
         
         resources["gold"] = resources.get("gold", 0) - hire_cost
@@ -909,7 +904,7 @@ class HireNPCModal(Modal, title="Наём NPC"):
         
         db.add_npc(user["faction_id"], self.name.value, None, loyalty, skill)
         
-        await interaction.response.send_message(f"✅ NPC **{self.name.value}** нанят за {hire_cost} {faction['currency']}!\nЛояльность: {loyalty}, Навык: {skill}", ephemeral=True)
+        await interaction.response.send_message(f"✅ NPC **{self.name.value}** нанят за {hire_cost} {faction['currency_name']}!\nЛояльность: {loyalty}, Навык: {skill}", ephemeral=True)
 
 class InvitePlayerModal(Modal, title="Пригласить игрока"):
     user_mention = TextInput(label="Упоминание игрока", placeholder="@Игрок или никнейм", required=True)
